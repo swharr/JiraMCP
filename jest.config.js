@@ -18,6 +18,7 @@ export default {
     '!src/**/*.d.ts',
     '!src/**/*.test.ts',
   ],
+  coverageReporters: ['text', 'lcov', 'html', 'json'],
   coverageThreshold: {
     global: {
       branches: 70,

@@ -100,7 +100,7 @@ See the [Setup Guide](docs/SETUP_GUIDE.md) for detailed instructions.
 - **Integration Tests**: End-to-end workflow validation
 - **Security Tests**: Injection prevention and access control
 - **CI/CD Pipeline**: Automated testing, security scanning, and deployment
-- **Code Quality**: ESLint, TypeScript strict mode, SonarCloud analysis
+- **Code Quality**: ESLint, TypeScript strict mode, SonarQube analysis
 
 ## Deployment Options
 
