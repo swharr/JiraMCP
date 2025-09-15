@@ -1,0 +1,1079 @@
+# Jira MCP Server Monitoring and Observability Guide
+
+## Overview
+
+This document provides comprehensive monitoring, alerting, and observability strategies for the Jira MCP Server, designed for enterprise production environments with high availability requirements.
+
+## Table of Contents
+
+- [Monitoring Architecture](#monitoring-architecture)
+- [Metrics Collection](#metrics-collection)
+- [Alerting Rules](#alerting-rules)
+- [Log Aggregation](#log-aggregation)
+- [Distributed Tracing](#distributed-tracing)
+- [Dashboard Configuration](#dashboard-configuration)
+- [SLA Monitoring](#sla-monitoring)
+- [Capacity Planning](#capacity-planning)
+
+## Monitoring Architecture
+
+### Components Overview
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│ Jira MCP Server │────│ Prometheus       │────│ Grafana         │
+│                 │    │ (Metrics)        │    │ (Visualization) │
+│ • App Metrics   │    │                  │    │                 │
+│ • Health Checks │    │ • Time Series DB │    │ • Dashboards    │
+│ • Custom Events │    │ • AlertManager   │    │ • Annotations   │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+         │                       │
+         │              ┌─────────────────┐    ┌─────────────────┐
+         └──────────────│ Loki/ELK        │────│ Jaeger/Zipkin   │
+                        │ (Log Aggregation)│    │ (Distributed    │
+                        │                 │    │  Tracing)       │
+                        │ • Structured    │    │                 │
+                        │ • Searchable    │    │ • Request Flow  │
+                        │ • Retention     │    │ • Performance   │
+                        └─────────────────┘    └─────────────────┘
+```
+
+### Monitoring Stack Deployment
+
+**Prometheus Operator:**
+```yaml
+# monitoring/prometheus-operator.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus-operator
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 45.7.1
+    helm:
+      values: |
+        grafana:
+          adminPassword: "secure-password"
+          ingress:
+            enabled: true
+            hosts:
+              - grafana.company.com
+        prometheus:
+          ingress:
+            enabled: true
+            hosts:
+              - prometheus.company.com
+          prometheusSpec:
+            retention: 30d
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: fast-ssd
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 50Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+## Metrics Collection
+
+### Application Metrics
+
+**Prometheus Metrics Configuration:**
+```typescript
+// src/metrics.ts
+import { register, Counter, Histogram, Gauge } from 'prom-client';
+
+// Request metrics
+export const httpRequestDuration = new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.1, 0.3, 0.5, 0.7, 1, 3, 5, 7, 10]
+});
+
+export const httpRequestsTotal = new Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'route', 'status_code']
+});
+
+// Jira API metrics
+export const jiraApiRequestDuration = new Histogram({
+  name: 'jira_api_request_duration_seconds',
+  help: 'Duration of Jira API requests in seconds',
+  labelNames: ['operation', 'status'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30]
+});
+
+export const jiraApiRequestsTotal = new Counter({
+  name: 'jira_api_requests_total',
+  help: 'Total number of Jira API requests',
+  labelNames: ['operation', 'status']
+});
+
+export const jiraApiErrorsTotal = new Counter({
+  name: 'jira_api_errors_total',
+  help: 'Total number of Jira API errors',
+  labelNames: ['operation', 'error_type']
+});
+
+// Business metrics
+export const boardsDiscovered = new Gauge({
+  name: 'jira_boards_discovered_total',
+  help: 'Total number of Jira boards discovered'
+});
+
+export const closedItemsProcessed = new Counter({
+  name: 'jira_closed_items_processed_total',
+  help: 'Total number of closed items processed',
+  labelNames: ['board_id', 'project']
+});
+
+export const announcementsGenerated = new Counter({
+  name: 'announcements_generated_total',
+  help: 'Total number of announcements generated',
+  labelNames: ['format', 'board_count']
+});
+
+// System metrics
+export const activeConnections = new Gauge({
+  name: 'active_connections_current',
+  help: 'Current number of active connections'
+});
+
+export const cacheHitRate = new Gauge({
+  name: 'cache_hit_rate_percentage',
+  help: 'Cache hit rate percentage'
+});
+
+// Register all metrics
+register.registerMetric(httpRequestDuration);
+register.registerMetric(httpRequestsTotal);
+register.registerMetric(jiraApiRequestDuration);
+register.registerMetric(jiraApiRequestsTotal);
+register.registerMetric(jiraApiErrorsTotal);
+register.registerMetric(boardsDiscovered);
+register.registerMetric(closedItemsProcessed);
+register.registerMetric(announcementsGenerated);
+register.registerMetric(activeConnections);
+register.registerMetric(cacheHitRate);
+```
+
+**ServiceMonitor Configuration:**
+```yaml
+# monitoring/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jira-mcp-server
+  namespace: monitoring
+  labels:
+    app: jira-mcp-server
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jira-mcp-server
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'jira_mcp_.*'
+      targetLabel: service
+      replacement: 'jira-mcp-server'
+```
+
+### Infrastructure Metrics
+
+**Node Exporter Configuration:**
+```yaml
+# monitoring/node-exporter.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.5.0
+        args:
+        - '--path.procfs=/host/proc'
+        - '--path.sysfs=/host/sys'
+        - '--path.rootfs=/host/root'
+        - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+        ports:
+        - containerPort: 9100
+          hostPort: 9100
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: root
+          mountPath: /host/root
+          readOnly: true
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: root
+        hostPath:
+          path: /
+```
+
+## Alerting Rules
+
+### Critical Alerts (P1)
+
+```yaml
+# monitoring/alerts-critical.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: jira-mcp-critical-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: jira-mcp-critical
+    interval: 30s
+    rules:
+
+    # Service availability
+    - alert: JiraMCPServerDown
+      expr: up{job="jira-mcp-server"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "Jira MCP Server is down"
+        description: "Jira MCP Server has been down for more than 1 minute. Pod: {{ $labels.pod }}"
+        runbook_url: "https://docs.company.com/runbooks/jira-mcp-server-down"
+
+    # High error rate
+    - alert: JiraMCPHighErrorRate
+      expr: |
+        (
+          rate(jira_api_errors_total[5m]) /
+          rate(jira_api_requests_total[5m])
+        ) * 100 > 5
+      for: 3m
+      labels:
+        severity: critical
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "High error rate detected"
+        description: "Error rate is {{ $value }}% over the last 5 minutes"
+        runbook_url: "https://docs.company.com/runbooks/jira-mcp-high-errors"
+
+    # Jira API authentication failures
+    - alert: JiraMCPAuthFailure
+      expr: increase(jira_api_errors_total{error_type="auth_failed"}[5m]) > 0
+      for: 0m
+      labels:
+        severity: critical
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "Jira API authentication failure"
+        description: "Authentication failures detected: {{ $value }} in the last 5 minutes"
+        runbook_url: "https://docs.company.com/runbooks/jira-auth-failure"
+
+    # Pod crash loop
+    - alert: JiraMCPPodCrashLoop
+      expr: rate(kube_pod_container_status_restarts_total{container="jira-mcp-server"}[15m]) > 0
+      for: 5m
+      labels:
+        severity: critical
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "Pod is crash looping"
+        description: "Pod {{ $labels.pod }} is restarting frequently"
+        runbook_url: "https://docs.company.com/runbooks/pod-crash-loop"
+```
+
+### Warning Alerts (P2)
+
+```yaml
+# monitoring/alerts-warning.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: jira-mcp-warning-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: jira-mcp-warning
+    interval: 60s
+    rules:
+
+    # High response time
+    - alert: JiraMCPHighLatency
+      expr: |
+        histogram_quantile(0.95,
+          rate(jira_api_request_duration_seconds_bucket[5m])
+        ) > 2
+      for: 10m
+      labels:
+        severity: warning
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "High response time detected"
+        description: "95th percentile response time is {{ $value }}s over the last 5 minutes"
+        runbook_url: "https://docs.company.com/runbooks/high-latency"
+
+    # High memory usage
+    - alert: JiraMCPHighMemoryUsage
+      expr: |
+        (
+          container_memory_working_set_bytes{container="jira-mcp-server"} /
+          container_spec_memory_limit_bytes{container="jira-mcp-server"}
+        ) * 100 > 80
+      for: 5m
+      labels:
+        severity: warning
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "High memory usage"
+        description: "Memory usage is {{ $value }}% of limit"
+        runbook_url: "https://docs.company.com/runbooks/high-memory"
+
+    # High CPU usage
+    - alert: JiraMCPHighCPUUsage
+      expr: |
+        rate(container_cpu_usage_seconds_total{container="jira-mcp-server"}[5m]) * 100 > 70
+      for: 10m
+      labels:
+        severity: warning
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "High CPU usage"
+        description: "CPU usage is {{ $value }}% over the last 5 minutes"
+        runbook_url: "https://docs.company.com/runbooks/high-cpu"
+
+    # Low cache hit rate
+    - alert: JiraMCPLowCacheHitRate
+      expr: cache_hit_rate_percentage < 60
+      for: 15m
+      labels:
+        severity: warning
+        team: platform
+        service: jira-mcp-server
+      annotations:
+        summary: "Low cache hit rate"
+        description: "Cache hit rate is {{ $value }}% for the last 15 minutes"
+        runbook_url: "https://docs.company.com/runbooks/low-cache-hit-rate"
+```
+
+### AlertManager Configuration
+
+```yaml
+# monitoring/alertmanager-config.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+stringData:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.company.com:587'
+      smtp_from: 'alerts@company.com'
+      slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+
+    route:
+      group_by: ['alertname', 'service']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'default'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+        group_wait: 10s
+        repeat_interval: 5m
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+        repeat_interval: 24h
+
+    receivers:
+    - name: 'default'
+      slack_configs:
+      - channel: '#monitoring'
+        title: 'Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+    - name: 'critical-alerts'
+      slack_configs:
+      - channel: '#critical-alerts'
+        title: ' CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *Description:* {{ .Annotations.description }}
+          *Runbook:* {{ .Annotations.runbook_url }}
+          {{ end }}
+        send_resolved: true
+      email_configs:
+      - to: 'oncall@company.com'
+        subject: 'CRITICAL ALERT: {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Service: {{ .Labels.service }}
+          Runbook: {{ .Annotations.runbook_url }}
+          {{ end }}
+
+    - name: 'warning-alerts'
+      slack_configs:
+      - channel: '#platform-alerts'
+        title: ' WARNING: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+    inhibit_rules:
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'service']
+```
+
+## Log Aggregation
+
+### Structured Logging Configuration
+
+**Loki Stack Deployment:**
+```yaml
+# monitoring/loki-stack.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki-stack
+    targetRevision: 2.9.10
+    helm:
+      values: |
+        loki:
+          enabled: true
+          persistence:
+            enabled: true
+            size: 100Gi
+            storageClassName: fast-ssd
+          config:
+            schema_config:
+              configs:
+                - from: 2020-10-24
+                  store: boltdb-shipper
+                  object_store: filesystem
+                  schema: v11
+                  index:
+                    prefix: index_
+                    period: 24h
+            retention_deletes_enabled: true
+            retention_period: 744h  # 31 days
+
+        promtail:
+          enabled: true
+          config:
+            clients:
+              - url: http://loki:3100/loki/api/v1/push
+            scrape_configs:
+              - job_name: kubernetes-pods
+                kubernetes_sd_configs:
+                  - role: pod
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                    action: keep
+                    regex: true
+                  - source_labels: [__meta_kubernetes_pod_container_name]
+                    target_label: container
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+
+        grafana:
+          enabled: false  # Use existing Grafana from prometheus-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+```
+
+**Fluent Bit Configuration:**
+```yaml
+# monitoring/fluent-bit.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: monitoring
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*jira-mcp*.log
+        Parser            cri
+        Tag               jira-mcp.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+
+    [FILTER]
+        Name                kubernetes
+        Match               jira-mcp.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     jira-mcp.var.log.containers.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+
+    [FILTER]
+        Name                parser
+        Match               jira-mcp.*
+        Key_Name            log
+        Parser              json
+        Reserve_Data        On
+
+    [OUTPUT]
+        Name                loki
+        Match               jira-mcp.*
+        Host                loki.monitoring.svc.cluster.local
+        Port                3100
+        Labels              job=jira-mcp-server
+        Auto_Kubernetes_Labels On
+
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    timestamp
+        Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+        Time_Keep   On
+
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<message>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+```
+
+### Log Analysis Queries
+
+**Common LogQL Queries:**
+```bash
+# Error rate over time
+{container="jira-mcp-server"} |= "ERROR" | rate(1m)
+
+# Slow requests (>2s)
+{container="jira-mcp-server"} | json | duration > 2000 | line_format "{{.timestamp}} {{.message}}"
+
+# Authentication failures
+{container="jira-mcp-server"} |= "JIRA_AUTH_FAILED" | json | line_format "{{.timestamp}} User: {{.userId}} Error: {{.error}}"
+
+# Request patterns by endpoint
+sum by (operation) (rate({container="jira-mcp-server"} | json | __error__ = "" [5m]))
+
+# Error distribution
+sum by (error_type) (rate({container="jira-mcp-server"} |= "ERROR" | json | __error__ = "" [5m]))
+```
+
+## Distributed Tracing
+
+### Jaeger Setup
+
+```yaml
+# monitoring/jaeger.yaml
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: jira-mcp-jaeger
+  namespace: monitoring
+spec:
+  strategy: production
+  storage:
+    type: elasticsearch
+    elasticsearch:
+      nodeCount: 3
+      redundancyPolicy: SingleRedundancy
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 500m
+        limits:
+          memory: 4Gi
+          cpu: 1
+  query:
+    replicas: 2
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 100m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+  collector:
+    maxReplicas: 5
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 100m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+```
+
+**Application Tracing Configuration:**
+```typescript
+// src/tracing.ts
+import { NodeTracerProvider } from '@opentelemetry/sdk-node';
+import { Resource } from '@opentelemetry/resources';
+import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
+import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
+
+const provider = new NodeTracerProvider({
+  resource: new Resource({
+    [SemanticResourceAttributes.SERVICE_NAME]: 'jira-mcp-server',
+    [SemanticResourceAttributes.SERVICE_VERSION]: process.env.npm_package_version || '0.1.0',
+    [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV || 'development'
+  })
+});
+
+const jaegerExporter = new JaegerExporter({
+  endpoint: process.env.JAEGER_ENDPOINT || 'http://jira-mcp-jaeger-collector:14268/api/traces'
+});
+
+provider.addSpanProcessor(new BatchSpanProcessor(jaegerExporter));
+provider.register();
+
+export { provider };
+```
+
+## Dashboard Configuration
+
+### Grafana Dashboard JSON
+
+```json
+{
+  "dashboard": {
+    "id": null,
+    "title": "Jira MCP Server",
+    "tags": ["jira", "mcp", "integration"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Service Health",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"jira-mcp-server\"}",
+            "legendFormat": "Service Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"0": {"text": "DOWN", "color": "red"}}, "type": "value"},
+              {"options": {"1": {"text": "UP", "color": "green"}}, "type": "value"}
+            ]
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"jira-mcp-server\"}[5m])",
+            "legendFormat": "{{method}} {{route}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 3,
+        "title": "Response Time (95th percentile)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"jira-mcp-server\"}[5m]))",
+            "legendFormat": "95th percentile"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(jira_api_errors_total{job=\"jira-mcp-server\"}[5m])",
+            "legendFormat": "{{error_type}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 5,
+        "title": "Jira API Performance",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(jira_api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(jira_api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "50th percentile"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 6,
+        "title": "Resource Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{container=\"jira-mcp-server\"}[5m]) * 100",
+            "legendFormat": "CPU %"
+          },
+          {
+            "expr": "container_memory_working_set_bytes{container=\"jira-mcp-server\"} / 1024 / 1024",
+            "legendFormat": "Memory MB"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}
+```
+
+### Business Metrics Dashboard
+
+```json
+{
+  "dashboard": {
+    "title": "Jira MCP Business Metrics",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Boards Monitored",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "jira_boards_discovered_total",
+            "legendFormat": "Total Boards"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Items Processed",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(jira_closed_items_processed_total[5m])",
+            "legendFormat": "Items/sec"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Announcements Generated",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "sum by (format) (increase(announcements_generated_total[24h]))",
+            "legendFormat": "{{format}}"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## SLA Monitoring
+
+### Service Level Objectives (SLOs)
+
+**SLO Configuration:**
+```yaml
+# monitoring/slo-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jira-mcp-slo-config
+  namespace: monitoring
+data:
+  slo.yaml: |
+    slos:
+      availability:
+        target: 99.9%
+        window: 30d
+        query: |
+          (
+            sum(rate(http_requests_total{job="jira-mcp-server", code!~"5.."}[5m])) /
+            sum(rate(http_requests_total{job="jira-mcp-server"}[5m]))
+          ) * 100
+
+      response_time:
+        target: 95%  # 95% of requests < 2s
+        window: 30d
+        query: |
+          (
+            histogram_quantile(0.95,
+              rate(http_request_duration_seconds_bucket{job="jira-mcp-server"}[5m])
+            ) < 2
+          ) * 100
+
+      error_rate:
+        target: 99%  # <1% error rate
+        window: 30d
+        query: |
+          (
+            1 - (
+              sum(rate(jira_api_errors_total[5m])) /
+              sum(rate(jira_api_requests_total[5m]))
+            )
+          ) * 100
+```
+
+**SLO Dashboard Creation:**
+```bash
+# Create SLO dashboard
+cat > slo-dashboard.json << 'EOF'
+{
+  "dashboard": {
+    "title": "Jira MCP SLO Dashboard",
+    "panels": [
+      {
+        "title": "Availability SLO",
+        "type": "stat",
+        "targets": [{
+          "expr": "avg_over_time(up{job=\"jira-mcp-server\"}[30d]) * 100",
+          "legendFormat": "30-day availability"
+        }],
+        "thresholds": [
+          {"color": "red", "value": 0},
+          {"color": "yellow", "value": 99},
+          {"color": "green", "value": 99.9}
+        ]
+      },
+      {
+        "title": "Error Budget Burn Rate",
+        "type": "graph",
+        "targets": [{
+          "expr": "1 - (sum(rate(http_requests_total{job=\"jira-mcp-server\", code!~\"5..\"}[1h])) / sum(rate(http_requests_total{job=\"jira-mcp-server\"}[1h])))",
+          "legendFormat": "1h burn rate"
+        }]
+      }
+    ]
+  }
+}
+EOF
+```
+
+## Capacity Planning
+
+### Resource Prediction Queries
+
+**CPU Usage Trends:**
+```promql
+# Predict CPU usage for next 7 days
+predict_linear(
+  avg_over_time(
+    rate(container_cpu_usage_seconds_total{container="jira-mcp-server"}[5m])[7d:1h]
+  )[1h:5m],
+  7 * 24 * 3600
+) * 100
+```
+
+**Memory Usage Trends:**
+```promql
+# Predict memory usage for next 7 days
+predict_linear(
+  avg_over_time(
+    container_memory_working_set_bytes{container="jira-mcp-server"}[7d:1h]
+  )[1h:5m],
+  7 * 24 * 3600
+) / 1024 / 1024 / 1024
+```
+
+**Traffic Growth Analysis:**
+```promql
+# Request rate growth
+increase(http_requests_total{job="jira-mcp-server"}[7d]) / 7
+```
+
+### Automated Scaling Recommendations
+
+```yaml
+# monitoring/capacity-alerts.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: jira-mcp-capacity-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: capacity-planning
+    interval: 1h
+    rules:
+    - alert: JiraMCPCapacityWarning
+      expr: |
+        predict_linear(
+          avg_over_time(
+            rate(container_cpu_usage_seconds_total{container="jira-mcp-server"}[5m])[24h:1h]
+          )[1h:5m],
+          7 * 24 * 3600
+        ) * 100 > 80
+      for: 1h
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "Predicted high CPU usage in 7 days"
+        description: "CPU usage is predicted to exceed 80% in 7 days: {{ $value }}%"
+
+    - alert: JiraMCPMemoryCapacityWarning
+      expr: |
+        predict_linear(
+          avg_over_time(
+            container_memory_working_set_bytes{container="jira-mcp-server"}[24h:1h]
+          )[1h:5m],
+          7 * 24 * 3600
+        ) / container_spec_memory_limit_bytes{container="jira-mcp-server"} * 100 > 85
+      for: 1h
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "Predicted high memory usage in 7 days"
+        description: "Memory usage is predicted to exceed 85% in 7 days: {{ $value }}%"
+```
+
+## Best Practices
+
+### Monitoring Implementation Checklist
+
+- [ ] **Metrics Collection**
+  - [ ] Application metrics exposed at `/metrics`
+  - [ ] Business metrics implemented
+  - [ ] Resource metrics collected
+  - [ ] Custom dashboards created
+
+- [ ] **Alerting Configuration**
+  - [ ] Critical alerts defined (P1)
+  - [ ] Warning alerts configured (P2)
+  - [ ] Alert routing configured
+  - [ ] Escalation procedures documented
+
+- [ ] **Log Management**
+  - [ ] Structured logging implemented
+  - [ ] Log aggregation configured
+  - [ ] Log retention policies set
+  - [ ] Search and analysis capabilities
+
+- [ ] **SLA Monitoring**
+  - [ ] SLOs defined and measured
+  - [ ] Error budgets tracked
+  - [ ] SLA reports automated
+  - [ ] Capacity planning implemented
+
+### Performance Baselines
+
+| Metric | Baseline | Warning Threshold | Critical Threshold |
+|--------|----------|-------------------|-------------------|
+| **Availability** | 99.9% | 99.5% | 99.0% |
+| **Response Time (95th percentile)** | <1s | 2s | 5s |
+| **Error Rate** | <0.1% | 1% | 5% |
+| **CPU Usage** | <50% | 70% | 85% |
+| **Memory Usage** | <60% | 80% | 90% |
+| **Jira API Success Rate** | >99.9% | 99% | 95% |
+
+---
+
+**Document Version**: 1.0
+**Last Updated**: $(date +%Y-%m-%d)
+**Owner**: SRE Team
+**Review Cycle**: Quarterly

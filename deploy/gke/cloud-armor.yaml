@@ -1,0 +1,38 @@
+# Google Cloud Armor Security Policy
+# Apply via gcloud command: gcloud compute security-policies create jira-mcp-armor-policy
+
+# Example gcloud commands for setup:
+#
+# 1. Create security policy
+# gcloud compute security-policies create jira-mcp-armor-policy \
+#   --description "Security policy for Jira MCP Server"
+#
+# 2. Add rate limiting rule
+# gcloud compute security-policies rules create 1000 \
+#   --security-policy jira-mcp-armor-policy \
+#   --expression "true" \
+#   --action "rate-based-ban" \
+#   --rate-limit-threshold-count 100 \
+#   --rate-limit-threshold-interval-sec 60 \
+#   --ban-duration-sec 600 \
+#   --conform-action allow \
+#   --exceed-action deny-429 \
+#   --enforce-on-key IP
+#
+# 3. Add geo-blocking rule (optional)
+# gcloud compute security-policies rules create 2000 \
+#   --security-policy jira-mcp-armor-policy \
+#   --expression "origin.region_code == 'CN' || origin.region_code == 'RU'" \
+#   --action deny-403
+#
+# 4. Add SQL injection protection
+# gcloud compute security-policies rules create 3000 \
+#   --security-policy jira-mcp-armor-policy \
+#   --expression "evaluatePreconfiguredExpr('sqli-stable')" \
+#   --action deny-403
+#
+# 5. Add XSS protection
+# gcloud compute security-policies rules create 4000 \
+#   --security-policy jira-mcp-armor-policy \
+#   --expression "evaluatePreconfiguredExpr('xss-stable')" \
+#   --action deny-403

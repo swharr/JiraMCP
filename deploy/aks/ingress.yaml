@@ -1,0 +1,45 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jira-mcp-ingress
+  namespace: jira-mcp
+  labels:
+    app: jira-mcp-server
+  annotations:
+    kubernetes.io/ingress.class: "azure/application-gateway"
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/connection-draining: "true"
+    appgw.ingress.kubernetes.io/connection-draining-timeout: "30"
+    appgw.ingress.kubernetes.io/request-timeout: "30"
+    appgw.ingress.kubernetes.io/backend-path-prefix: "/"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - jira-mcp.yourdomain.com
+    secretName: jira-mcp-tls
+  rules:
+  - host: jira-mcp.yourdomain.com
+    http:
+      paths:
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-service
+            port:
+              number: 80
+      - path: /ready
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-service
+            port:
+              number: 80
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-service
+            port:
+              number: 80

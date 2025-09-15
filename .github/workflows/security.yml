@@ -121,6 +121,10 @@ jobs:
     name: Container Security Scan
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
 
     steps:
       - uses: actions/checkout@v4
@@ -141,14 +145,20 @@ jobs:
           docker build -t jira-mcp-server:latest .
 
       - name: Run Trivy container scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.16.1
         with:
           image-ref: 'jira-mcp-server:latest'
-          format: 'table'
-          exit-code: '1'
+          format: 'sarif'
+          output: 'trivy-container-results.sarif'
+          severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
           vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+
+      - name: Upload container scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-container-results.sarif') != ''
+        with:
+          sarif_file: 'trivy-container-results.sarif'
 
       - name: Run Grype scan
         uses: anchore/scan-action@v3

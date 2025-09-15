@@ -1,0 +1,81 @@
+# AWS EKS specific values
+
+cloudProvider:
+  provider: aws
+  aws:
+    clusterName: "jira-mcp-eks"
+    roleArn: "arn:aws:iam::ACCOUNT_ID:role/jira-mcp-role"
+    alb:
+      enabled: true
+      scheme: internal
+      certificateArn: "arn:aws:acm:REGION:ACCOUNT_ID:certificate/CERT_ID"
+
+# Enable ingress with ALB
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/healthcheck-path: "/health"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+  hosts:
+    - host: jira-mcp.internal.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+# Service configuration for ALB
+service:
+  type: NodePort
+  annotations:
+    alb.ingress.kubernetes.io/target-type: "ip"
+
+# Enable network policy
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8080
+
+# Resource allocation for AWS
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Enable monitoring
+monitoring:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    labels:
+      app: jira-mcp-server
+
+# Autoscaling for AWS
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+# Node selector for EKS
+nodeSelector:
+  kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
+
+# Tolerations for spot instances
+tolerations:
+  - key: "spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"

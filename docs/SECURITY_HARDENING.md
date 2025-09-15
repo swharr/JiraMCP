@@ -1,0 +1,1493 @@
+# Jira MCP Server Security Hardening Guide
+
+## Overview
+
+This document provides comprehensive security hardening procedures for the Jira MCP Server, designed for enterprise environments with strict security requirements including SOC 2, GDPR, and industry compliance standards.
+
+## Table of Contents
+
+- [Security Architecture](#security-architecture)
+- [Container Security](#container-security)
+- [Kubernetes Security](#kubernetes-security)
+- [Network Security](#network-security)
+- [Secrets Management](#secrets-management)
+- [Access Control](#access-control)
+- [Audit & Compliance](#audit--compliance)
+- [Vulnerability Management](#vulnerability-management)
+- [Incident Response](#incident-response)
+
+## Security Architecture
+
+### Security Layers
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Internet                              │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ WAF / Cloud Armor / Application Gateway                     │
+│ • DDoS Protection  • Rate Limiting  • Geo-blocking         │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ Load Balancer / Ingress Controller                          │
+│ • TLS Termination  • SSL/TLS 1.2+  • Certificate Mgmt      │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ Kubernetes Network Policies                                 │
+│ • Pod-to-Pod Isolation  • Egress Control  • DNS Policy     │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ Service Mesh (Optional - Istio/Linkerd)                     │
+│ • mTLS  • Service-to-Service Auth  • Traffic Policy        │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ Pod Security Context                                         │
+│ • Non-root User  • Read-only Filesystem  • No Capabilities │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│ Application Security                                         │
+│ • Input Validation  • Output Encoding  • Error Handling    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Defense in Depth Strategy
+
+1. **Perimeter Security**: WAF, DDoS protection, geo-blocking
+2. **Network Security**: Network segmentation, micro-segmentation
+3. **Identity & Access**: RBAC, service accounts, least privilege
+4. **Application Security**: Input validation, secure coding practices
+5. **Data Security**: Encryption at rest and in transit
+6. **Monitoring**: Real-time threat detection, audit logging
+
+## Container Security
+
+### Base Image Hardening
+
+**Multi-stage Dockerfile Security Analysis:**
+```dockerfile
+# Security-hardened Dockerfile
+FROM node:20-alpine AS builder
+# Use specific version, not 'latest'
+# Alpine base for smaller attack surface
+
+# Create non-root user early
+RUN addgroup -g 1001 -S nodejs \
+    && adduser -S nodejs -u 1001
+
+# Install only required build dependencies
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+COPY src/ ./src/
+RUN npm run build
+
+# Production stage
+FROM node:20-alpine AS production
+
+# Security updates
+RUN apk update && apk upgrade \
+    && apk add --no-cache dumb-init curl \
+    && apk del apk-tools \
+    && rm -rf /var/cache/apk/* /tmp/*
+
+# Create application user
+RUN addgroup -g 1001 -S nodejs \
+    && adduser -S nodejs -u 1001
+
+WORKDIR /app
+
+# Copy with proper ownership
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --chown=nodejs:nodejs package*.json ./
+
+# Remove write permissions from application directory
+RUN chmod -R 755 /app \
+    && mkdir -p /app/logs /app/tmp \
+    && chown -R nodejs:nodejs /app/logs /app/tmp \
+    && chmod 750 /app/logs /app/tmp
+
+USER nodejs
+
+# Security labels
+LABEL org.opencontainers.image.vendor="Your Organization" \
+      org.opencontainers.image.licenses="MIT" \
+      security.scan.enabled="true"
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
+```
+
+### Container Security Scanning
+
+**Trivy Security Configuration:**
+```yaml
+# .trivy.yaml
+format: table
+exit-code: 1
+severity: HIGH,CRITICAL
+ignore-unfixed: true
+vuln-type: os,library
+security-checks: vuln,config,secret
+
+# Ignore specific vulnerabilities (with justification)
+ignore:
+  - CVE-2023-XXXXX  # Not applicable to our use case
+```
+
+**Docker Scout Integration:**
+```bash
+#!/bin/bash
+# scripts/security-scan.sh
+
+set -euo pipefail
+
+IMAGE_NAME="${1:-jira-mcp-server:latest}"
+REPORT_DIR="./security-reports"
+TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+
+mkdir -p "$REPORT_DIR"
+
+echo " Starting comprehensive security scan for: $IMAGE_NAME"
+
+# 1. Trivy vulnerability scan
+echo " Running Trivy vulnerability scan..."
+trivy image --format json --output "$REPORT_DIR/trivy-$TIMESTAMP.json" "$IMAGE_NAME"
+trivy image --format table --severity HIGH,CRITICAL "$IMAGE_NAME"
+
+# 2. Docker Scout scan
+echo " Running Docker Scout scan..."
+docker scout cves "$IMAGE_NAME" --format json --output "$REPORT_DIR/scout-$TIMESTAMP.json"
+
+# 3. Hadolint Dockerfile analysis
+echo " Running Hadolint Dockerfile scan..."
+hadolint Dockerfile --format json > "$REPORT_DIR/hadolint-$TIMESTAMP.json"
+
+# 4. Container structure test
+echo " Running container structure test..."
+container-structure-test test --image "$IMAGE_NAME" --config container-structure-test.yaml
+
+# 5. Generate security report
+echo " Generating security summary..."
+cat > "$REPORT_DIR/security-summary-$TIMESTAMP.md" << EOF
+# Security Scan Report
+
+**Image**: $IMAGE_NAME
+**Scan Date**: $(date)
+
+## Vulnerability Summary
+
+$(trivy image --format table --severity HIGH,CRITICAL "$IMAGE_NAME" | grep -E "HIGH|CRITICAL" | wc -l) high/critical vulnerabilities found
+
+## Compliance Checks
+
+- [ ] No high/critical vulnerabilities
+- [ ] Non-root user configured
+- [ ] Read-only filesystem
+- [ ] No unnecessary packages
+- [ ] Security labels present
+
+## Reports Generated
+
+- Trivy: trivy-$TIMESTAMP.json
+- Docker Scout: scout-$TIMESTAMP.json
+- Hadolint: hadolint-$TIMESTAMP.json
+
+EOF
+
+echo " Security scan complete. Reports saved to: $REPORT_DIR"
+```
+
+### Container Structure Tests
+
+```yaml
+# container-structure-test.yaml
+schemaVersion: '2.0.0'
+
+fileExistenceTests:
+  - name: 'Application files exist'
+    path: '/app/dist/index.js'
+    shouldExist: true
+  - name: 'Package.json exists'
+    path: '/app/package.json'
+    shouldExist: true
+  - name: 'No shell installed'
+    path: '/bin/sh'
+    shouldExist: false
+
+fileContentTests:
+  - name: 'Non-root user configured'
+    path: '/etc/passwd'
+    expectedContents: ['nodejs:x:1001:1001']
+
+commandTests:
+  - name: 'Application runs as non-root'
+    command: 'whoami'
+    expectedOutput: ['nodejs']
+
+  - name: 'Node.js version is secure'
+    command: 'node'
+    args: ['--version']
+    expectedOutput: ['v20.*']
+
+  - name: 'No unnecessary packages'
+    command: 'apk'
+    args: ['list', '--installed']
+    excludedOutput: ['git', 'curl', 'wget', 'bash']
+
+metadataTest:
+  exposedPorts: ['8080']
+  user: 'nodejs'
+  cmd: ['node', 'dist/index.js']
+  entrypoint: ['dumb-init', '--']
+```
+
+## Kubernetes Security
+
+### Pod Security Standards
+
+**Pod Security Policy (PSP) - Legacy:**
+```yaml
+# security/pod-security-policy.yaml
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: jira-mcp-restricted
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: true
+```
+
+**Pod Security Standards (PSS) - Current:**
+```yaml
+# security/namespace-security.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jira-mcp
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+### Network Policies
+
+**Comprehensive Network Policy:**
+```yaml
+# security/network-policy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jira-mcp-network-policy
+  namespace: jira-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: jira-mcp-server
+  policyTypes:
+  - Ingress
+  - Egress
+
+  ingress:
+  # Allow ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+
+  # Allow monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+
+  egress:
+  # Allow DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+  # Allow HTTPS to Jira API
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+
+  # Allow Kubernetes API (for health checks)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Default deny all ingress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: jira-mcp
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+
+---
+# Default deny all egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: jira-mcp
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+```
+
+### RBAC Configuration
+
+**Service Account and RBAC:**
+```yaml
+# security/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jira-mcp-service-account
+  namespace: jira-mcp
+  labels:
+    app.kubernetes.io/name: jira-mcp-server
+automountServiceAccountToken: false  # Disable auto-mounting
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: jira-mcp
+  name: jira-mcp-role
+rules:
+# Minimal permissions - only what's absolutely necessary
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+  resourceNames: ["jira-mcp-secrets"]  # Specific secret only
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jira-mcp-rolebinding
+  namespace: jira-mcp
+subjects:
+- kind: ServiceAccount
+  name: jira-mcp-service-account
+  namespace: jira-mcp
+roleRef:
+  kind: Role
+  name: jira-mcp-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRole for node metrics (if needed)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: jira-mcp-metrics-reader
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/metrics"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jira-mcp-metrics-binding
+subjects:
+- kind: ServiceAccount
+  name: jira-mcp-service-account
+  namespace: jira-mcp
+roleRef:
+  kind: ClusterRole
+  name: jira-mcp-metrics-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+### Security Context
+
+**Pod and Container Security Context:**
+```yaml
+# Applied in deployment.yaml
+spec:
+  template:
+    spec:
+      # Pod security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        fsGroupChangePolicy: "OnRootMismatch"
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+        - name: net.core.somaxconn
+          value: "1024"
+
+      containers:
+      - name: jira-mcp-server
+        # Container security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+
+        # Resource limits (security consideration)
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+            ephemeral-storage: "1Gi"
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+            ephemeral-storage: "512Mi"
+
+        # Probes with security timeouts
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+```
+
+## Network Security
+
+### TLS Configuration
+
+**Ingress TLS Configuration:**
+```yaml
+# security/ingress-tls.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jira-mcp-ingress
+  namespace: jira-mcp
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
+    nginx.ingress.kubernetes.io/ssl-ciphers: "ECDHE-RSA-AES128-GCM-SHA256,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-RSA-AES128-SHA256,ECDHE-RSA-AES256-SHA384"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify-depth: "3"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Content-Type-Options nosniff;
+      add_header X-Frame-Options DENY;
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload";
+      add_header Referrer-Policy "strict-origin-when-cross-origin";
+      add_header Content-Security-Policy "default-src 'self'";
+spec:
+  tls:
+  - hosts:
+    - jira-mcp.company.com
+    secretName: jira-mcp-tls
+  rules:
+  - host: jira-mcp.company.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-service
+            port:
+              number: 80
+```
+
+**Certificate Management:**
+```yaml
+# security/certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: jira-mcp-tls
+  namespace: jira-mcp
+spec:
+  secretName: jira-mcp-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - jira-mcp.company.com
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days before expiry
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: certs@company.com
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+```
+
+### Service Mesh Security (Optional)
+
+**Istio Security Configuration:**
+```yaml
+# security/istio-security.yaml
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: jira-mcp-mtls
+  namespace: jira-mcp
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jira-mcp-server
+  mtls:
+    mode: STRICT
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: jira-mcp-authz
+  namespace: jira-mcp
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jira-mcp-server
+  rules:
+  - from:
+    - source:
+        namespaces: ["ingress-nginx"]
+    - source:
+        namespaces: ["monitoring"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/health", "/ready", "/metrics", "/api/*"]
+```
+
+## Secrets Management
+
+### Kubernetes Secrets Security
+
+**Secret Creation and Management:**
+```bash
+#!/bin/bash
+# scripts/create-secrets.sh
+
+set -euo pipefail
+
+NAMESPACE="jira-mcp"
+SECRET_NAME="jira-mcp-secrets"
+
+# Validate inputs
+if [[ -z "${JIRA_HOST:-}" ]]; then
+  echo " JIRA_HOST environment variable is required"
+  exit 1
+fi
+
+if [[ -z "${JIRA_EMAIL:-}" ]]; then
+  echo " JIRA_EMAIL environment variable is required"
+  exit 1
+fi
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo " JIRA_API_TOKEN environment variable is required"
+  exit 1
+fi
+
+# Validate token format
+if [[ ! "$JIRA_API_TOKEN" =~ ^ATATT3x ]]; then
+  echo " Invalid Jira API token format. Should start with ATATT3x"
+  exit 1
+fi
+
+# Create namespace if it doesn't exist
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+# Delete existing secret if it exists
+kubectl delete secret "$SECRET_NAME" -n "$NAMESPACE" --ignore-not-found=true
+
+# Create new secret
+kubectl create secret generic "$SECRET_NAME" \
+  --namespace="$NAMESPACE" \
+  --from-literal=JIRA_HOST="$JIRA_HOST" \
+  --from-literal=JIRA_EMAIL="$JIRA_EMAIL" \
+  --from-literal=JIRA_API_TOKEN="$JIRA_API_TOKEN" \
+  --from-literal=SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}" \
+  --from-literal=TEAMS_WEBHOOK_URL="${TEAMS_WEBHOOK_URL:-}" \
+  --dry-run=client -o yaml | \
+  kubectl apply -f -
+
+# Add labels and annotations for security
+kubectl label secret "$SECRET_NAME" -n "$NAMESPACE" \
+  app.kubernetes.io/name=jira-mcp-server \
+  app.kubernetes.io/component=secrets
+
+kubectl annotate secret "$SECRET_NAME" -n "$NAMESPACE" \
+  "created-by=$(whoami)" \
+  "created-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+echo " Secret '$SECRET_NAME' created successfully in namespace '$NAMESPACE'"
+
+# Verify secret
+kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o jsonpath='{.data}' | jq 'keys'
+```
+
+### External Secrets Integration
+
+**AWS Secrets Manager Integration:**
+```yaml
+# security/external-secrets-aws.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: aws-secrets-manager
+  namespace: jira-mcp
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: jira-mcp-service-account
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: jira-mcp-external-secret
+  namespace: jira-mcp
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: SecretStore
+  target:
+    name: jira-mcp-secrets
+    creationPolicy: Owner
+  data:
+  - secretKey: JIRA_HOST
+    remoteRef:
+      key: jira-mcp/production
+      property: jira_host
+  - secretKey: JIRA_EMAIL
+    remoteRef:
+      key: jira-mcp/production
+      property: jira_email
+  - secretKey: JIRA_API_TOKEN
+    remoteRef:
+      key: jira-mcp/production
+      property: jira_api_token
+```
+
+**Azure Key Vault Integration:**
+```yaml
+# security/external-secrets-azure.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: azure-key-vault
+  namespace: jira-mcp
+spec:
+  provider:
+    azurekv:
+      vaultUrl: "https://jira-mcp-kv.vault.azure.net/"
+      authType: WorkloadIdentity
+      serviceAccountRef:
+        name: jira-mcp-service-account
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: jira-mcp-external-secret
+  namespace: jira-mcp
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    name: azure-key-vault
+    kind: SecretStore
+  target:
+    name: jira-mcp-secrets
+    creationPolicy: Owner
+  data:
+  - secretKey: JIRA_HOST
+    remoteRef:
+      key: jira-host
+  - secretKey: JIRA_EMAIL
+    remoteRef:
+      key: jira-email
+  - secretKey: JIRA_API_TOKEN
+    remoteRef:
+      key: jira-api-token
+```
+
+## Access Control
+
+### Authentication Strategy
+
+**OpenID Connect Integration:**
+```yaml
+# security/oidc-auth.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth2-proxy-config
+  namespace: jira-mcp
+data:
+  oauth2_proxy.cfg: |
+    provider = "oidc"
+    oidc_issuer_url = "https://auth.company.com"
+    client_id = "jira-mcp-client"
+    client_secret_file = "/etc/oauth2-proxy/client-secret"
+    cookie_secret_file = "/etc/oauth2-proxy/cookie-secret"
+    email_domains = ["company.com"]
+    upstreams = ["http://jira-mcp-service:80"]
+    http_address = "0.0.0.0:4180"
+    reverse_proxy = true
+    set_xauthrequest = true
+    pass_access_token = true
+    pass_user_headers = true
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: jira-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: oauth2-proxy
+    spec:
+      serviceAccountName: oauth2-proxy
+      containers:
+      - name: oauth2-proxy
+        image: quay.io/oauth2-proxy/oauth2-proxy:v7.4.0
+        args:
+        - --config=/etc/oauth2-proxy/oauth2_proxy.cfg
+        volumeMounts:
+        - name: config
+          mountPath: /etc/oauth2-proxy
+        - name: secrets
+          mountPath: /etc/oauth2-proxy/client-secret
+          subPath: client-secret
+        - name: secrets
+          mountPath: /etc/oauth2-proxy/cookie-secret
+          subPath: cookie-secret
+        ports:
+        - containerPort: 4180
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 10m
+          limits:
+            memory: 128Mi
+            cpu: 100m
+      volumes:
+      - name: config
+        configMap:
+          name: oauth2-proxy-config
+      - name: secrets
+        secret:
+          secretName: oauth2-proxy-secrets
+```
+
+### API Security
+
+**API Rate Limiting and Security:**
+```typescript
+// src/security/api-security.ts
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import { Request, Response, NextFunction } from 'express';
+
+// Rate limiting configuration
+export const createRateLimit = (windowMs: number, max: number) => {
+  return rateLimit({
+    windowMs,
+    max,
+    message: {
+      error: 'Too many requests',
+      retryAfter: Math.ceil(windowMs / 1000)
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req: Request, res: Response) => {
+      logger.warn('Rate limit exceeded', {
+        ip: req.ip,
+        userAgent: req.get('User-Agent'),
+        path: req.path
+      });
+      res.status(429).json({
+        error: 'Too many requests',
+        retryAfter: Math.ceil(windowMs / 1000)
+      });
+    }
+  });
+};
+
+// Security headers middleware
+export const securityHeaders = helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+});
+
+// Input validation middleware
+export const validateInput = (req: Request, res: Response, next: NextFunction) => {
+  const userAgent = req.get('User-Agent') || '';
+
+  // Block known malicious user agents
+  const maliciousPatterns = [
+    /sqlmap/i,
+    /nikto/i,
+    /dirb/i,
+    /nmap/i,
+    /masscan/i
+  ];
+
+  for (const pattern of maliciousPatterns) {
+    if (pattern.test(userAgent)) {
+      logger.warn('Blocked malicious request', {
+        ip: req.ip,
+        userAgent,
+        path: req.path
+      });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+  }
+
+  next();
+};
+```
+
+## Audit & Compliance
+
+### Audit Logging
+
+**Comprehensive Audit Configuration:**
+```typescript
+// src/audit/audit-logger.ts
+import { createLogger, format, transports } from 'winston';
+
+interface AuditEvent {
+  timestamp: string;
+  correlationId: string;
+  userId?: string;
+  action: string;
+  resource: string;
+  outcome: 'success' | 'failure';
+  sourceIp: string;
+  userAgent: string;
+  details?: Record<string, any>;
+}
+
+export class AuditLogger {
+  private logger = createLogger({
+    level: 'info',
+    format: format.combine(
+      format.timestamp(),
+      format.errors({ stack: true }),
+      format.json()
+    ),
+    defaultMeta: { service: 'jira-mcp-server', type: 'audit' },
+    transports: [
+      new transports.File({
+        filename: '/app/logs/audit.log',
+        maxsize: 100 * 1024 * 1024, // 100MB
+        maxFiles: 10,
+        tailable: true
+      }),
+      new transports.Console({
+        format: format.simple()
+      })
+    ]
+  });
+
+  public logEvent(event: AuditEvent): void {
+    this.logger.info('AUDIT_EVENT', event);
+  }
+
+  public logAuthentication(userId: string, outcome: 'success' | 'failure', sourceIp: string): void {
+    this.logEvent({
+      timestamp: new Date().toISOString(),
+      correlationId: generateCorrelationId(),
+      userId,
+      action: 'AUTHENTICATION',
+      resource: 'auth',
+      outcome,
+      sourceIp,
+      userAgent: ''
+    });
+  }
+
+  public logApiAccess(userId: string, action: string, resource: string, outcome: 'success' | 'failure', sourceIp: string, userAgent: string): void {
+    this.logEvent({
+      timestamp: new Date().toISOString(),
+      correlationId: generateCorrelationId(),
+      userId,
+      action,
+      resource,
+      outcome,
+      sourceIp,
+      userAgent
+    });
+  }
+
+  public logDataAccess(userId: string, boardIds: number[], outcome: 'success' | 'failure', sourceIp: string): void {
+    this.logEvent({
+      timestamp: new Date().toISOString(),
+      correlationId: generateCorrelationId(),
+      userId,
+      action: 'DATA_ACCESS',
+      resource: 'jira_boards',
+      outcome,
+      sourceIp,
+      userAgent: '',
+      details: { boardIds }
+    });
+  }
+}
+
+function generateCorrelationId(): string {
+  return `audit-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+```
+
+### Compliance Frameworks
+
+**SOC 2 Compliance Checklist:**
+```yaml
+# compliance/soc2-controls.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: soc2-compliance-config
+  namespace: jira-mcp
+data:
+  controls.yaml: |
+    soc2_controls:
+      CC6.1:  # Logical and physical access controls
+        implemented: true
+        controls:
+          - RBAC configured with least privilege
+          - Network policies restrict pod-to-pod communication
+          - TLS encryption for all communications
+          - Multi-factor authentication required
+
+      CC6.2:  # Authentication and authorization
+        implemented: true
+        controls:
+          - OpenID Connect integration
+          - Service account tokens with minimal permissions
+          - API key rotation every 90 days
+          - Audit logging for all authentication events
+
+      CC6.3:  # System access monitoring
+        implemented: true
+        controls:
+          - Comprehensive audit logging
+          - Real-time monitoring and alerting
+          - Log retention for 7 years
+          - Security incident response procedures
+
+      CC7.1:  # System boundaries and data classification
+        implemented: true
+        controls:
+          - Network segmentation with firewalls
+          - Data classification policies
+          - Encryption at rest and in transit
+          - Secure development lifecycle
+```
+
+**GDPR Compliance Configuration:**
+```yaml
+# compliance/gdpr-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gdpr-compliance-config
+  namespace: jira-mcp
+data:
+  gdpr.yaml: |
+    gdpr_compliance:
+      data_processing:
+        lawful_basis: "Legitimate Interest"
+        purpose: "Jira board monitoring and announcement generation"
+        categories:
+          - "User identifiers (email addresses)"
+          - "Technical data (IP addresses, logs)"
+          - "Usage data (API requests, response times)"
+
+      data_retention:
+        personal_data: "30 days"
+        technical_logs: "90 days"
+        audit_logs: "7 years"
+
+      rights_management:
+        access: "Implemented via API"
+        rectification: "Manual process"
+        erasure: "Automated after retention period"
+        portability: "JSON export available"
+        objection: "Opt-out mechanism"
+
+      privacy_by_design:
+        data_minimization: true
+        purpose_limitation: true
+        storage_limitation: true
+        accuracy: true
+        security: true
+        accountability: true
+```
+
+## Vulnerability Management
+
+### Automated Security Scanning
+
+**CI/CD Security Pipeline:**
+```yaml
+# .github/workflows/security-scan.yml
+name: Security Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Docker image
+      run: docker build -t jira-mcp-server:${{ github.sha }} .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'jira-mcp-server:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Snyk to check for vulnerabilities
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+    - name: Upload Snyk results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: snyk.sarif
+
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/owasp-top-ten
+          p/typescript
+```
+
+### Vulnerability Remediation Process
+
+**Security Issue Triage:**
+```bash
+#!/bin/bash
+# scripts/security-triage.sh
+
+set -euo pipefail
+
+SCAN_RESULTS="${1:-trivy-results.json}"
+SEVERITY_THRESHOLD="${2:-HIGH}"
+
+echo " Analyzing security scan results: $SCAN_RESULTS"
+
+# Parse scan results
+CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$SCAN_RESULTS")
+HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$SCAN_RESULTS")
+MEDIUM_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' "$SCAN_RESULTS")
+
+echo " Vulnerability Summary:"
+echo "   CRITICAL: $CRITICAL_COUNT"
+echo "   HIGH: $HIGH_COUNT"
+echo "   MEDIUM: $MEDIUM_COUNT"
+
+# Generate remediation plan
+cat > vulnerability-report.md << EOF
+# Vulnerability Remediation Report
+
+**Scan Date**: $(date)
+**Image**: $(jq -r '.ArtifactName' "$SCAN_RESULTS")
+
+## Summary
+- **Critical**: $CRITICAL_COUNT
+- **High**: $HIGH_COUNT
+- **Medium**: $MEDIUM_COUNT
+
+## Critical Vulnerabilities
+$(jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | "- **\(.VulnerabilityID)**: \(.Title) (Fixed in: \(.FixedVersion // "No fix available"))"' "$SCAN_RESULTS")
+
+## High Priority Vulnerabilities
+$(jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH") | "- **\(.VulnerabilityID)**: \(.Title) (Fixed in: \(.FixedVersion // "No fix available"))"' "$SCAN_RESULTS")
+
+## Recommended Actions
+1. **Immediate**: Address all CRITICAL vulnerabilities
+2. **This Week**: Address HIGH vulnerabilities with available fixes
+3. **This Month**: Address remaining HIGH and MEDIUM vulnerabilities
+4. **Ongoing**: Monitor for new vulnerabilities
+
+EOF
+
+# Fail if critical vulnerabilities found
+if [[ $CRITICAL_COUNT -gt 0 ]]; then
+  echo " CRITICAL vulnerabilities found! Immediate action required."
+  exit 1
+elif [[ $HIGH_COUNT -gt 10 ]]; then
+  echo "  High number of HIGH severity vulnerabilities. Review required."
+  exit 1
+else
+  echo " Security scan passed acceptance criteria."
+fi
+```
+
+## Incident Response
+
+### Security Incident Playbook
+
+**Incident Classification:**
+```yaml
+# security/incident-classification.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-classification
+  namespace: jira-mcp
+data:
+  classification.yaml: |
+    incident_types:
+      P1_CRITICAL:
+        - "Confirmed data breach"
+        - "Active malicious activity"
+        - "Complete service compromise"
+        - "Critical vulnerability exploitation"
+        response_time: "15 minutes"
+        notification: ["security-team", "ciso", "legal"]
+
+      P2_HIGH:
+        - "Suspected data access"
+        - "Authentication bypass"
+        - "Privilege escalation"
+        - "Service disruption"
+        response_time: "1 hour"
+        notification: ["security-team", "devops-team"]
+
+      P3_MEDIUM:
+        - "Failed authentication attempts"
+        - "Unusual access patterns"
+        - "Performance anomalies"
+        - "Configuration drift"
+        response_time: "4 hours"
+        notification: ["devops-team"]
+```
+
+**Automated Incident Response:**
+```bash
+#!/bin/bash
+# scripts/incident-response.sh
+
+set -euo pipefail
+
+INCIDENT_TYPE="${1:-}"
+SEVERITY="${2:-P3}"
+DESCRIPTION="${3:-Security incident detected}"
+
+if [[ -z "$INCIDENT_TYPE" ]]; then
+  echo "Usage: $0 <incident_type> [severity] [description]"
+  exit 1
+fi
+
+TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
+INCIDENT_ID="SEC-$TIMESTAMP"
+
+echo " Security Incident Response Initiated"
+echo "Incident ID: $INCIDENT_ID"
+echo "Type: $INCIDENT_TYPE"
+echo "Severity: $SEVERITY"
+
+# Create incident directory
+INCIDENT_DIR="./incidents/$INCIDENT_ID"
+mkdir -p "$INCIDENT_DIR"
+
+# Collect evidence
+echo " Collecting evidence..."
+
+# Kubernetes logs
+kubectl logs -n jira-mcp deployment/jira-mcp-server --since=1h > "$INCIDENT_DIR/app-logs.log"
+kubectl get events -n jira-mcp --sort-by='.lastTimestamp' > "$INCIDENT_DIR/k8s-events.log"
+kubectl describe pods -n jira-mcp > "$INCIDENT_DIR/pod-status.log"
+
+# Network information
+kubectl get networkpolicies -n jira-mcp -o yaml > "$INCIDENT_DIR/network-policies.yaml"
+kubectl get services -n jira-mcp -o yaml > "$INCIDENT_DIR/services.yaml"
+
+# Security-relevant information
+kubectl get secrets -n jira-mcp -o yaml > "$INCIDENT_DIR/secrets-metadata.yaml"
+kubectl get configmaps -n jira-mcp -o yaml > "$INCIDENT_DIR/configmaps.yaml"
+
+# Application metrics
+curl -s http://jira-mcp-service:8080/metrics > "$INCIDENT_DIR/metrics.txt" 2>/dev/null || echo "Metrics unavailable" > "$INCIDENT_DIR/metrics.txt"
+
+# Create incident report
+cat > "$INCIDENT_DIR/incident-report.md" << EOF
+# Security Incident Report
+
+**Incident ID**: $INCIDENT_ID
+**Detection Time**: $(date -u)
+**Incident Type**: $INCIDENT_TYPE
+**Severity**: $SEVERITY
+**Description**: $DESCRIPTION
+
+## Timeline
+- **$(date -u)**: Incident detected and response initiated
+
+## Evidence Collected
+- Application logs (last 1 hour)
+- Kubernetes events
+- Pod status and descriptions
+- Network policies and services
+- Configuration metadata
+- Application metrics
+
+## Immediate Actions Taken
+- [ ] Evidence collection completed
+- [ ] Incident documented
+- [ ] Team notified
+
+## Investigation Status
+- [ ] Root cause analysis
+- [ ] Impact assessment
+- [ ] Containment measures
+- [ ] Recovery plan
+
+## Next Steps
+1. Analyze collected evidence
+2. Determine root cause
+3. Implement containment
+4. Develop recovery plan
+5. Post-incident review
+
+EOF
+
+# Notify team based on severity
+case "$SEVERITY" in
+  P1)
+    echo " P1 CRITICAL incident - Notifying security team and CISO"
+    # Add notification logic here
+    ;;
+  P2)
+    echo " P2 HIGH incident - Notifying security and DevOps teams"
+    # Add notification logic here
+    ;;
+  P3)
+    echo " P3 MEDIUM incident - Notifying DevOps team"
+    # Add notification logic here
+    ;;
+esac
+
+echo " Incident response initiated. Report available at: $INCIDENT_DIR/incident-report.md"
+echo "Next: Analyze evidence and determine appropriate response actions."
+```
+
+## Security Testing
+
+### Penetration Testing
+
+**Security Test Suite:**
+```bash
+#!/bin/bash
+# scripts/security-test.sh
+
+set -euo pipefail
+
+TARGET_URL="${1:-http://localhost:8080}"
+REPORT_DIR="./security-test-reports"
+TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+
+mkdir -p "$REPORT_DIR"
+
+echo " Starting security test suite against: $TARGET_URL"
+
+# 1. Port scanning
+echo " Port scanning..."
+nmap -sS -O -A "$TARGET_URL" > "$REPORT_DIR/nmap-$TIMESTAMP.txt" 2>&1 || true
+
+# 2. SSL/TLS testing
+echo " SSL/TLS testing..."
+if command -v testssl.sh &> /dev/null; then
+  testssl.sh "$TARGET_URL" > "$REPORT_DIR/tls-test-$TIMESTAMP.txt" 2>&1 || true
+fi
+
+# 3. HTTP security headers
+echo " HTTP security headers testing..."
+curl -I "$TARGET_URL/health" > "$REPORT_DIR/headers-$TIMESTAMP.txt" 2>&1 || true
+
+# 4. Authentication testing
+echo " Authentication testing..."
+# Test endpoints without authentication
+curl -w "%{http_code}\n" -o /dev/null -s "$TARGET_URL/api/boards" >> "$REPORT_DIR/auth-test-$TIMESTAMP.txt" 2>&1 || true
+
+# 5. Input validation testing
+echo " Input validation testing..."
+# Test for common injection attacks
+PAYLOADS=(
+  "' OR '1'='1"
+  "<script>alert('xss')</script>"
+  "../../../etc/passwd"
+  "'; DROP TABLE users; --"
+)
+
+for payload in "${PAYLOADS[@]}"; do
+  echo "Testing payload: $payload" >> "$REPORT_DIR/injection-test-$TIMESTAMP.txt"
+  curl -w "%{http_code}\n" -o /dev/null -s \
+    -X POST "$TARGET_URL/api/test" \
+    -H "Content-Type: application/json" \
+    -d "{\"test\":\"$payload\"}" >> "$REPORT_DIR/injection-test-$TIMESTAMP.txt" 2>&1 || true
+done
+
+# 6. Rate limiting testing
+echo " Rate limiting testing..."
+for i in {1..35}; do
+  curl -w "%{http_code}\n" -o /dev/null -s "$TARGET_URL/health" >> "$REPORT_DIR/rate-limit-test-$TIMESTAMP.txt" 2>&1 || true
+  sleep 0.1
+done
+
+echo " Security testing complete. Reports saved to: $REPORT_DIR"
+```
+
+---
+
+**Document Version**: 1.0
+**Last Updated**: $(date +%Y-%m-%d)
+**Classification**: Internal Use Only
+**Owner**: Security Team
+**Review Cycle**: Quarterly

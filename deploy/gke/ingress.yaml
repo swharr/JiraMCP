@@ -1,0 +1,49 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jira-mcp-ingress
+  namespace: jira-mcp
+  labels:
+    app: jira-mcp-server
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "jira-mcp-ip"
+    networking.gke.io/managed-certificates: "jira-mcp-ssl-cert"
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+    ingress.gcp.kubernetes.io/force-ssl-redirect: "true"
+    cloud.google.com/armor-config: '{"jira-mcp-security-policy": "jira-mcp-armor-policy"}'
+spec:
+  rules:
+  - host: jira-mcp.yourdomain.com
+    http:
+      paths:
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-nodeport
+            port:
+              number: 80
+      - path: /ready
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-nodeport
+            port:
+              number: 80
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: jira-mcp-nodeport
+            port:
+              number: 80
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: jira-mcp-ssl-cert
+  namespace: jira-mcp
+spec:
+  domains:
+    - jira-mcp.yourdomain.com
