@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jira-mcp
+  labels:
+    name: jira-mcp
+    app: jira-mcp-server

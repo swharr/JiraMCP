@@ -1,4 +1,4 @@
-import { JiraIssue } from './jira-client.js';
+import { JiraIssue } from './jira-client-secure.js';
 
 export class BlogScaffolder {
   generateContent(issues: JiraIssue[], format: 'blog' | 'announcement' | 'both'): string {

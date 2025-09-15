@@ -1,0 +1,288 @@
+# Default values for jira-mcp-server
+# This is a YAML-formatted file.
+
+# Global configuration
+global:
+  # Image registry to use for all images
+  imageRegistry: ""
+  # Image pull secrets for private registries
+  imagePullSecrets: []
+  # Storage class for persistent volumes
+  storageClass: ""
+
+# Application configuration
+image:
+  repository: jira-mcp-server
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Number of replicas
+replicaCount: 2
+
+# Strategy for updating pods
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 1
+
+# Application configuration
+config:
+  # Environment (development, staging, production)
+  nodeEnv: production
+  # Log level (debug, info, warn, error)
+  logLevel: info
+  # Health check configuration
+  healthCheckPort: 8080
+  # Rate limiting configuration
+  rateLimitWindowMs: 60000
+  rateLimitMaxRequests: 30
+  # Cache configuration
+  cacheTtlMinutes: 15
+  # Request timeout configuration
+  requestTimeoutMs: 10000
+  maxExecutionTimeMs: 30000
+
+# Secret configuration
+secrets:
+  # Existing secret name (if you want to use an external secret)
+  existingSecret: ""
+  # Jira configuration (only used if existingSecret is empty)
+  jiraHost: ""
+  jiraEmail: ""
+  jiraApiToken: ""
+  # Notification webhooks (only used if existingSecret is empty)
+  slackWebhookUrl: ""
+  teamsWebhookUrl: ""
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: jira-mcp.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: jira-mcp-tls
+    #   hosts:
+    #     - jira-mcp.local
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  fsGroupChangePolicy: "OnRootMismatch"
+
+# Container security context
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  capabilities:
+    drop:
+      - ALL
+
+# Service account
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+# Pod labels
+podLabels: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - jira-mcp-server
+          topologyKey: kubernetes.io/hostname
+
+# Persistent volumes
+persistence:
+  # Enable persistent storage for logs
+  enabled: false
+  # Storage class (if empty, uses default)
+  storageClass: ""
+  # Access mode
+  accessMode: ReadWriteOnce
+  # Storage size
+  size: 1Gi
+  # Annotations
+  annotations: {}
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+# Network policy
+networkPolicy:
+  enabled: false
+  # Ingress rules
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  # Egress rules
+  egress:
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443  # HTTPS
+        - protocol: TCP
+          port: 53   # DNS
+        - protocol: UDP
+          port: 53   # DNS
+
+# Monitoring
+monitoring:
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+
+# Cloud-specific configurations
+cloudProvider:
+  # Cloud provider: aws, azure, gcp, or generic
+  provider: generic
+
+  # AWS specific configuration
+  aws:
+    # EKS cluster name
+    clusterName: ""
+    # IAM role ARN for service account
+    roleArn: ""
+    # ALB ingress configuration
+    alb:
+      enabled: false
+      scheme: internal
+      certificateArn: ""
+
+  # Azure specific configuration
+  azure:
+    # AKS cluster name
+    clusterName: ""
+    # Resource group
+    resourceGroup: ""
+    # Application Gateway configuration
+    appGateway:
+      enabled: false
+      resourceGroup: ""
+      name: ""
+
+  # GCP specific configuration
+  gcp:
+    # GKE cluster name
+    clusterName: ""
+    # Project ID
+    projectId: ""
+    # Workload Identity
+    workloadIdentity:
+      enabled: false
+      serviceAccount: ""
+    # Cloud Armor
+    cloudArmor:
+      enabled: false
+      policyName: ""
+
+# Additional volumes
+extraVolumes: []
+
+# Additional volume mounts
+extraVolumeMounts: []
+
+# Environment variables from ConfigMaps or Secrets
+extraEnvVars: []
+
+# Additional containers (sidecars)
+extraContainers: []
+
+# Init containers
+initContainers: []

@@ -1,0 +1,92 @@
+# Azure AKS specific values
+
+cloudProvider:
+  provider: azure
+  azure:
+    clusterName: "jira-mcp-aks"
+    resourceGroup: "jira-mcp-rg"
+    appGateway:
+      enabled: true
+      resourceGroup: "jira-mcp-rg"
+      name: "jira-mcp-appgw"
+
+# Global image registry (Azure Container Registry)
+global:
+  imageRegistry: "jiramcp.azurecr.io"
+
+# Enable ingress with Application Gateway
+ingress:
+  enabled: true
+  className: "azure/application-gateway"
+  annotations:
+    appgw.ingress.kubernetes.io/backend-path-prefix: "/"
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/connection-draining: "true"
+    appgw.ingress.kubernetes.io/connection-draining-timeout: "30"
+    appgw.ingress.kubernetes.io/request-timeout: "30"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: jira-mcp.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: jira-mcp-tls
+      hosts:
+        - jira-mcp.company.com
+
+# Service configuration for Application Gateway
+service:
+  type: LoadBalancer
+
+# Enable network policy
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+# Resource allocation for Azure
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Enable monitoring
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: prometheus
+
+# Autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Node selector for AKS
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations for spot instances
+tolerations:
+  - key: "kubernetes.azure.com/scalesetpriority"
+    operator: "Equal"
+    value: "spot"
+    effect: "NoSchedule"
+
+# Pod annotations for Azure Monitor
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"

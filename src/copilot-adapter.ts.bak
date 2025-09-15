@@ -1,0 +1,364 @@
+/**
+ * Microsoft Copilot Integration Adapter
+ *
+ * This module provides integration with Microsoft Copilot by implementing
+ * the Microsoft Bot Framework protocols and adapting the MCP server functionality
+ * to work with Copilot's messaging interface.
+ */
+
+import { TurnContext, ActivityHandler, MessageFactory, Activity, ActivityTypes } from 'botbuilder';
+import { JiraClientSecure } from './jira-client-secure.js';
+import { logger } from './logger.js';
+import { validateBoardIds, validateDays, sanitizeInput } from './validators.js';
+
+interface CopilotConfig {
+  appId: string;
+  appPassword: string;
+  tenantId?: string;
+  enabledCommands: string[];
+}
+
+export class CopilotAdapter extends ActivityHandler {
+  private jiraClient: JiraClientSecure;
+  private config: CopilotConfig;
+
+  constructor(jiraClient: JiraClientSecure, config: CopilotConfig) {
+    super();
+    this.jiraClient = jiraClient;
+    this.config = config;
+
+    // Handle messages from Copilot
+    this.onMessage(async (context, next) => {
+      await this.handleMessage(context);
+      await next();
+    });
+
+    // Handle member additions (when bot is added to a conversation)
+    this.onMembersAdded(async (context, next) => {
+      await this.sendWelcomeMessage(context);
+      await next();
+    });
+  }
+
+  /**
+   * Process incoming messages from Microsoft Copilot
+   */
+  private async handleMessage(context: TurnContext): Promise<void> {
+    const correlationId = `copilot-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const userMessage = context.activity.text?.trim() || '';
+
+    logger.info('Received Copilot message', {
+      correlationId,
+      userId: context.activity.from.id,
+      userMessage: sanitizeInput(userMessage),
+      conversationId: context.activity.conversation.id
+    });
+
+    try {
+      const response = await this.processCommand(userMessage, correlationId);
+      await context.sendActivity(MessageFactory.text(response));
+    } catch (error) {
+      logger.error('Error processing Copilot command', {
+        correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        userMessage: sanitizeInput(userMessage)
+      });
+
+      await context.sendActivity(MessageFactory.text(
+        'Sorry, I encountered an error while processing your request. Please try again or contact support.'
+      ));
+    }
+  }
+
+  /**
+   * Process natural language commands and map them to MCP tool calls
+   */
+  private async processCommand(message: string, correlationId: string): Promise<string> {
+    const lowerMessage = message.toLowerCase().trim();
+
+    // Parse natural language commands
+    if (this.isListBoardsCommand(lowerMessage)) {
+      return await this.handleListBoards(correlationId);
+    }
+
+    if (this.isGetClosedItemsCommand(lowerMessage)) {
+      const { boardIds, days } = this.parseClosedItemsCommand(message);
+      return await this.handleGetClosedItems(boardIds, days, correlationId);
+    }
+
+    if (this.isGenerateAnnouncementCommand(lowerMessage)) {
+      const { boardIds, days, format } = this.parseAnnouncementCommand(message);
+      return await this.handleGenerateAnnouncement(boardIds, days, format, correlationId);
+    }
+
+    if (this.isHelpCommand(lowerMessage)) {
+      return this.getHelpMessage();
+    }
+
+    // If no command matches, provide suggestions
+    return this.getUnknownCommandResponse();
+  }
+
+  /**
+   * Command pattern matching
+   */
+  private isListBoardsCommand(message: string): boolean {
+    const patterns = [
+      /list.*boards?/,
+      /show.*boards?/,
+      /get.*boards?/,
+      /what.*boards?/,
+      /available.*boards?/
+    ];
+    return patterns.some(pattern => pattern.test(message));
+  }
+
+  private isGetClosedItemsCommand(message: string): boolean {
+    const patterns = [
+      /closed.*items?/,
+      /completed.*items?/,
+      /finished.*tasks?/,
+      /done.*tickets?/,
+      /recent.*completions?/
+    ];
+    return patterns.some(pattern => pattern.test(message));
+  }
+
+  private isGenerateAnnouncementCommand(message: string): boolean {
+    const patterns = [
+      /generate.*announcement/,
+      /create.*announcement/,
+      /make.*announcement/,
+      /scaffold.*announcement/,
+      /blog.*post/,
+      /pmm.*update/
+    ];
+    return patterns.some(pattern => pattern.test(message));
+  }
+
+  private isHelpCommand(message: string): boolean {
+    const patterns = [/^help$/i, /^\\?$/i, /what.*can.*do/i, /commands?/i];
+    return patterns.some(pattern => pattern.test(message));
+  }
+
+  /**
+   * Command parsers
+   */
+  private parseClosedItemsCommand(message: string): { boardIds: number[], days: number } {
+    // Extract board IDs
+    const boardMatches = message.match(/board[s]?\s*(\d+(?:\s*,\s*\d+)*)/i);
+    let boardIds: number[] = [];
+
+    if (boardMatches) {
+      boardIds = boardMatches[1].split(',').map(id => parseInt(id.trim(), 10)).filter(id => !isNaN(id));
+    }
+
+    // Extract days
+    const dayMatches = message.match(/(\d+)\s*days?/i) || message.match(/last\s*(\d+)/i);
+    let days = 7; // default
+
+    if (dayMatches) {
+      days = parseInt(dayMatches[1], 10);
+    } else if (message.includes('week')) {
+      days = 7;
+    } else if (message.includes('month')) {
+      days = 30;
+    }
+
+    return { boardIds, days };
+  }
+
+  private parseAnnouncementCommand(message: string): { boardIds: number[], days: number, format: string } {
+    const { boardIds, days } = this.parseClosedItemsCommand(message);
+
+    let format = 'blog';
+    if (message.includes('announcement') || message.includes('pmm')) {
+      format = 'announcement';
+    } else if (message.includes('slack')) {
+      format = 'slack';
+    } else if (message.includes('teams')) {
+      format = 'teams';
+    }
+
+    return { boardIds, days, format };
+  }
+
+  /**
+   * Command handlers
+   */
+  private async handleListBoards(correlationId: string): Promise<string> {
+    try {
+      const boards = await this.jiraClient.getBoards();
+
+      if (boards.length === 0) {
+        return 'No boards found. Please check your Jira permissions.';
+      }
+
+      let response = `**Available Jira Boards:**\n\n`;
+      boards.forEach(board => {
+        response += `• **${board.name}** (ID: ${board.id})\n`;
+        if (board.type) {
+          response += `  Type: ${board.type}\n`;
+        }
+        response += '\n';
+      });
+
+      response += `\n**Tip:** Use board IDs in other commands like "show closed items for board 123"`;
+
+      return response;
+    } catch (error) {
+      logger.error('Error listing boards for Copilot', { correlationId, error });
+      return 'Unable to retrieve boards. Please check your Jira connection.';
+    }
+  }
+
+  private async handleGetClosedItems(boardIds: number[], days: number, correlationId: string): Promise<string> {
+    try {
+      // Validate inputs
+      if (boardIds.length === 0) {
+        return 'Please specify board IDs. Example: "show closed items for boards 123, 456 in the last 7 days"';
+      }
+
+      if (!validateBoardIds(boardIds)) {
+        return 'Invalid board IDs. Please provide valid numeric board IDs.';
+      }
+
+      if (!validateDays(days)) {
+        return 'Invalid days value. Please specify a number between 1 and 365.';
+      }
+
+      const closedItems = await this.jiraClient.getClosedItems(boardIds, days);
+
+      if (closedItems.length === 0) {
+        return `No closed items found in boards ${boardIds.join(', ')} over the last ${days} days.`;
+      }
+
+      let response = `🎯 **Closed Items (Last ${days} days)**\n\n`;
+      response += `Found ${closedItems.length} completed items:\n\n`;
+
+      // Group by board
+      const itemsByBoard = closedItems.reduce((acc, item) => {
+        const boardName = item.fields?.project?.name || 'Unknown Board';
+        if (!acc[boardName]) acc[boardName] = [];
+        acc[boardName].push(item);
+        return acc;
+      }, {} as Record<string, any[]>);
+
+      Object.entries(itemsByBoard).forEach(([boardName, items]) => {
+        response += `**${boardName}:**\n`;
+        items.slice(0, 5).forEach(item => { // Limit to 5 per board for readability
+          response += `• ${item.fields?.summary || 'No title'} (${item.key})\n`;
+          if (item.fields?.assignee?.displayName) {
+            response += `  👤 ${item.fields.assignee.displayName}\n`;
+          }
+        });
+
+        if (items.length > 5) {
+          response += `  ... and ${items.length - 5} more items\n`;
+        }
+        response += '\n';
+      });
+
+      response += `\n💡 **Tip:** Generate an announcement with "create announcement for these boards"`;
+
+      return response;
+    } catch (error) {
+      logger.error('Error getting closed items for Copilot', { correlationId, error });
+      return 'Unable to retrieve closed items. Please check your board IDs and try again.';
+    }
+  }
+
+  private async handleGenerateAnnouncement(boardIds: number[], days: number, format: string, correlationId: string): Promise<string> {
+    try {
+      if (boardIds.length === 0) {
+        return 'Please specify board IDs. Example: "create announcement for boards 123, 456"';
+      }
+
+      const announcement = await this.jiraClient.scaffoldAnnouncement(boardIds, days, format);
+
+      let response = `📢 **Generated ${format.charAt(0).toUpperCase() + format.slice(1)} Announcement**\n\n`;
+      response += '```\n';
+      response += announcement;
+      response += '\n```\n\n';
+      response += `📊 **Summary:** Based on ${boardIds.length} board(s) over ${days} days\n`;
+      response += `🔧 **Format:** ${format}\n\n`;
+      response += `💡 **Tip:** Copy this content and customize it for your needs!`;
+
+      return response;
+    } catch (error) {
+      logger.error('Error generating announcement for Copilot', { correlationId, error });
+      return 'Unable to generate announcement. Please check your board IDs and try again.';
+    }
+  }
+
+  /**
+   * Help and error responses
+   */
+  private getHelpMessage(): string {
+    return `🤖 **Jira MCP Assistant Help**
+
+I can help you with Jira board monitoring and announcement generation. Here are my commands:
+
+**📋 Board Management:**
+• "list boards" - Show available Jira boards
+• "show boards" - Same as above
+
+**📊 Closed Items:**
+• "show closed items for board 123" - Items from specific board
+• "closed items for boards 123, 456 in last 14 days" - Multiple boards with timeframe
+• "completed tasks last week" - Recent completions
+
+**📢 Announcements:**
+• "create announcement for board 123" - Generate blog post
+• "generate PMM update for boards 123, 456" - PMM format
+• "make slack announcement for board 123 last month" - Slack format
+
+**💡 Tips:**
+• You can use natural language - I understand various phrasings
+• Board IDs are shown when you list boards
+• Default timeframe is 7 days if not specified
+• Supported formats: blog, announcement, slack, teams
+
+Need help with something specific? Just ask!`;
+  }
+
+  private getUnknownCommandResponse(): string {
+    return `🤔 I didn't understand that command. Here are some things you can try:
+
+• "**list boards**" - See available Jira boards
+• "**show closed items for board 123**" - Get recent completions
+• "**create announcement for board 123**" - Generate content
+• "**help**" - Show all available commands
+
+💡 Try using natural language - I can understand various ways of asking!`;
+  }
+
+  /**
+   * Welcome message when bot is added to conversation
+   */
+  private async sendWelcomeMessage(context: TurnContext): Promise<void> {
+    const welcomeText = `👋 **Welcome to Jira MCP Assistant!**
+
+I'm here to help you monitor Jira boards and generate announcements. Here's what I can do:
+
+🔍 **Monitor closed items** from your Jira boards
+📢 **Generate announcements** in various formats (blog, PMM, Slack, Teams)
+📋 **List available boards** you have access to
+
+**Quick Start:**
+1. Type "**list boards**" to see your available boards
+2. Try "**show closed items for board [ID]**" to see recent completions
+3. Use "**help**" anytime for more detailed commands
+
+Let's get started! 🚀`;
+
+    await context.sendActivity(MessageFactory.text(welcomeText));
+  }
+}
+
+/**
+ * Factory function to create configured Copilot adapter
+ */
+export function createCopilotAdapter(jiraClient: JiraClientSecure, config: CopilotConfig): CopilotAdapter {
+  return new CopilotAdapter(jiraClient, config);
+}

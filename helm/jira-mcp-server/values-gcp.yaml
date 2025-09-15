@@ -1,0 +1,117 @@
+# Google GKE specific values
+
+cloudProvider:
+  provider: gcp
+  gcp:
+    clusterName: "jira-mcp-gke"
+    projectId: "your-project-id"
+    workloadIdentity:
+      enabled: true
+      serviceAccount: "jira-mcp@your-project-id.iam.gserviceaccount.com"
+    cloudArmor:
+      enabled: true
+      policyName: "jira-mcp-armor-policy"
+
+# Global image registry (Google Container Registry)
+global:
+  imageRegistry: "gcr.io/your-project-id"
+
+# Enable ingress with Google Cloud Load Balancer
+ingress:
+  enabled: true
+  className: "gce"
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "jira-mcp-ip"
+    networking.gke.io/managed-certificates: "jira-mcp-ssl-cert"
+    kubernetes.io/ingress.allow-http: "false"
+    ingress.gcp.kubernetes.io/force-ssl-redirect: "true"
+  hosts:
+    - host: jira-mcp.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+# Service configuration for GCP Load Balancer
+service:
+  type: NodePort
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+
+# Enable network policy
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: gce-system
+        - namespaceSelector:
+            matchLabels:
+              name: istio-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 443
+
+# Resource allocation for GCP
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Enable monitoring
+monitoring:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    labels:
+      team: platform
+
+# Autoscaling (higher limits for GKE)
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+# Node selector for GKE
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations for preemptible instances
+tolerations:
+  - key: "cloud.google.com/gke-preemptible"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+
+# Pod anti-affinity for better distribution
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - jira-mcp-server
+          topologyKey: kubernetes.io/hostname
+
+# Pod annotations for GCP monitoring
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+  cluster-autoscaler.kubernetes.io/safe-to-evict: "true"

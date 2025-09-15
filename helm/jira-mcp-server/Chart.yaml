@@ -1,0 +1,25 @@
+apiVersion: v2
+name: jira-mcp-server
+description: A Helm chart for Jira MCP Server - Enterprise MCP server for Jira integration
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - jira
+  - mcp
+  - model-context-protocol
+  - integration
+  - automation
+
+home: https://github.com/your-org/jira-mcp-server
+sources:
+  - https://github.com/your-org/jira-mcp-server
+
+maintainers:
+  - name: Your Organization
+    email: support@yourorg.com
+
+annotations:
+  category: Integration
+  licenses: MIT

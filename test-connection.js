@@ -27,7 +27,7 @@ async function testJiraConnection() {
     });
 
     console.log('✅ Connection successful!');
-    console.log(`Connected as: ${response.data.displayName} (${response.data.emailAddress})`);
+    console.log(`Connected as: ${response.data.displayName}`);
   } catch (error) {
     console.error('❌ Connection failed!');
     if (error.response?.status === 401) {

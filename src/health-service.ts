@@ -55,14 +55,13 @@ export class HealthService {
   private requestCount: number = 0;
   private errorCount: number = 0;
   private options: Required<Pick<HealthOptions, 'devMode' | 'requireToken'>> & { token?: string };
-
   constructor(port: number = 3000, host: string = '127.0.0.1', options: HealthOptions = {}) {
     this.app = express();
     this.startTime = Date.now();
     this.options = {
       devMode: options.devMode ?? false,
       requireToken: options.requireToken ?? false,
-      token: options.token,
+      token: options.token
     };
     this.setupMiddleware();
     this.setupRoutes();
