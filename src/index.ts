@@ -59,9 +59,15 @@ class JiraMCPServer {
 
     this.blogScaffolder = new BlogScaffolder();
 
-    // Initialize health service
-    const healthPort = parseInt(process.env.HEALTH_PORT || '3000', 10);
-    this.healthService = new HealthService(healthPort);
+    // Initialize health service (bind + token-gated in non-dev)
+    const devMode = (process.env.DEV_MODE || (process.env.NODE_ENV === 'development' ? 'true' : '')) === 'true';
+    const healthPort = parseInt(process.env.HEALTH_PORT || process.env.HEALTH_CHECK_PORT || '8080', 10);
+    const healthHost = process.env.HEALTH_HOST || (devMode ? '0.0.0.0' : '127.0.0.1');
+    this.healthService = new HealthService(healthPort, healthHost, {
+      devMode,
+      requireToken: !devMode,
+      token: process.env.HEALTH_TOKEN
+    });
     this.healthService.setJiraClient(this.jiraClient);
 
     this.setupHandlers();

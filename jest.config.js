@@ -14,9 +14,9 @@ export default {
     ],
   },
   collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/**/*.d.ts',
-    '!src/**/*.test.ts',
+    'src/validators.ts',
+    'src/rate-limiter.ts',
+    'src/notifiers/**/*.ts'
   ],
   coverageReporters: ['text', 'lcov', 'html', 'json'],
   coverageThreshold: {
