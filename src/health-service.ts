@@ -42,6 +42,12 @@ export interface MetricsData {
   };
 }
 
+interface HealthOptions {
+  devMode?: boolean;
+  requireToken?: boolean;
+  token?: string;
+}
+
 export class HealthService {
   private app: express.Application;
   private jiraClient?: SecureJiraClient;
@@ -49,12 +55,19 @@ export class HealthService {
   private requestCount: number = 0;
   private errorCount: number = 0;
 
-  constructor(port: number = 3000) {
+  private options: Required<Pick<HealthOptions, 'devMode' | 'requireToken'>> & { token?: string };
+
+  constructor(port: number = 3000, host: string = '127.0.0.1', options: HealthOptions = {}) {
     this.app = express();
     this.startTime = Date.now();
+    this.options = {
+      devMode: options.devMode ?? false,
+      requireToken: options.requireToken ?? false,
+      token: options.token
+    };
     this.setupMiddleware();
     this.setupRoutes();
-    this.start(port);
+    this.start(port, host);
   }
 
   setJiraClient(client: SecureJiraClient): void {
@@ -79,6 +92,15 @@ export class HealthService {
 
       next();
     });
+
+    // Basic security headers
+    this.app.use((req, res, next) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      res.setHeader('X-XSS-Protection', '1; mode=block');
+      next();
+    });
   }
 
   private setupRoutes(): void {
@@ -88,11 +110,23 @@ export class HealthService {
     // Readiness check endpoint (readiness probe)
     this.app.get('/ready', this.getReadiness.bind(this));
 
-    // Metrics endpoint
-    this.app.get('/metrics', this.getMetrics.bind(this));
+    // Metrics endpoint (protected in non-dev)
+    this.app.get('/metrics', this.authIfRequired.bind(this), this.getMetrics.bind(this));
 
-    // Info endpoint
-    this.app.get('/info', this.getInfo.bind(this));
+    // Info endpoint (protected in non-dev)
+    this.app.get('/info', this.authIfRequired.bind(this), this.getInfo.bind(this));
+  }
+
+  private authIfRequired(req: Request, res: Response, next: () => void): void {
+    if (!this.options.requireToken) {
+      return next();
+    }
+    const token = (req.headers['x-health-token'] as string | undefined) || undefined;
+    if (!token || !this.options.token || token !== this.options.token) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    next();
   }
 
   private async getHealth(req: Request, res: Response): Promise<void> {
@@ -239,10 +273,17 @@ export class HealthService {
   }
 
   private start(port: number): void {
-    this.app.listen(port, () => {
+    // default host binding handled by caller; overload to accept host
+  }
+
+  private start(port: number, host: string): void {
+    this.app.listen(port, host, () => {
       logger.info('Health service started', {
         operation: 'health_service_start',
-        port
+        port,
+        host,
+        devMode: this.options.devMode,
+        protected: this.options.requireToken
       });
     });
   }

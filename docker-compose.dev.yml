@@ -16,7 +16,9 @@ services:
     environment:
       - NODE_ENV=development
       - LOG_LEVEL=debug
-      - HEALTH_CHECK_PORT=8080
+      - HEALTH_PORT=8080
+      - HEALTH_HOST=0.0.0.0
+      - DEV_MODE=true
       - RATE_LIMIT_WINDOW_MS=60000
       - RATE_LIMIT_MAX_REQUESTS=100  # Higher limit for dev
       - CACHE_TTL_MINUTES=1  # Shorter cache for dev
