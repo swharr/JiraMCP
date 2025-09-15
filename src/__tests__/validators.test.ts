@@ -1,4 +1,4 @@
-import { InputValidator } from '../validators';
+import { InputValidator } from '../validators.js';
 
 describe('InputValidator', () => {
   describe('validateBoardIds', () => {
@@ -100,25 +100,25 @@ describe('InputValidator', () => {
 
   describe('sanitizeErrorMessage', () => {
     it('should redact URLs', () => {
-      const input = 'Error connecting to https://example.atlassian.net/rest/api';
+      const input = { message: 'Error connecting to https://example.atlassian.net/rest/api' };
       const result = InputValidator.sanitizeErrorMessage(input);
       expect(result).toBe('Error connecting to [URL_REDACTED]');
     });
 
     it('should redact email addresses', () => {
-      const input = 'Authentication failed for user@example.com';
+      const input = { message: 'Authentication failed for user@example.com' };
       const result = InputValidator.sanitizeErrorMessage(input);
       expect(result).toBe('Authentication failed for [EMAIL_REDACTED]');
     });
 
     it('should redact API tokens', () => {
-      const input = 'Invalid api_token: abc123xyz789';
+      const input = { message: 'Invalid api_token: abc123xyz789' };
       const result = InputValidator.sanitizeErrorMessage(input);
       expect(result).toBe('Invalid api_token: [REDACTED]');
     });
 
     it('should redact Bearer tokens', () => {
-      const input = 'Authorization failed: Bearer eyJhbGciOiJIUzI1NiIs...';
+      const input = { message: 'Authorization failed: Bearer eyJhbGciOiJIUzI1NiIs...' };
       const result = InputValidator.sanitizeErrorMessage(input);
       expect(result).toBe('Authorization failed: Bearer [TOKEN_REDACTED]');
     });

@@ -1,5 +1,5 @@
-import { SlackNotifier } from '../notifiers/slack-notifier';
-import { TeamsNotifier } from '../notifiers/teams-notifier';
+import { SlackNotifier } from '../notifiers/slack-notifier.js';
+import { TeamsNotifier } from '../notifiers/teams-notifier.js';
 import axios from 'axios';
 
 jest.mock('axios');
@@ -68,7 +68,17 @@ describe('SlackNotifier', () => {
       mockedAxios.post.mockRejectedValue(new Error('Network error'));
 
       const notifier = new SlackNotifier('https://hooks.slack.com/services/T123/B456/xyz');
-      const mockIssues = [{ id: '1', key: 'PROJ-123', fields: {} }];
+      const mockIssues = [{
+        id: '1',
+        key: 'PROJ-123',
+        fields: {
+          summary: 'Test issue',
+          issuetype: { name: 'Bug' },
+          status: { name: 'Done' },
+          created: '2024-01-01',
+          updated: '2024-01-02'
+        }
+      }];
 
       await expect(notifier.sendClosedItemsNotification(mockIssues as any, 'Test Board'))
         .rejects.toThrow('Failed to send Slack notification');
@@ -83,7 +93,7 @@ describe('TeamsNotifier', () => {
 
   describe('constructor', () => {
     it('should create instance with valid webhook URL', () => {
-      const notifier = new TeamsNotifier('https://outlook.office.com/webhook/abc123');
+      const notifier = new TeamsNotifier('https://company.webhook.office.com/webhookb2/abc123');
       expect(notifier).toBeDefined();
     });
 
@@ -102,7 +112,7 @@ describe('TeamsNotifier', () => {
     it('should send notification for closed items', async () => {
       mockedAxios.post.mockResolvedValue({ data: '1', status: 200 });
 
-      const notifier = new TeamsNotifier('https://outlook.office.com/webhook/abc123');
+      const notifier = new TeamsNotifier('https://company.webhook.office.com/webhookb2/abc123');
       const mockIssues = [
         {
           id: '1',
@@ -121,7 +131,7 @@ describe('TeamsNotifier', () => {
       await notifier.sendClosedItemsNotification(mockIssues as any, 'Test Board');
 
       expect(mockedAxios.post).toHaveBeenCalledWith(
-        'https://outlook.office.com/webhook/abc123',
+        'https://company.webhook.office.com/webhookb2/abc123',
         expect.objectContaining({
           '@type': 'MessageCard',
           '@context': 'https://schema.org/extensions',
@@ -134,7 +144,7 @@ describe('TeamsNotifier', () => {
     });
 
     it('should not send notification for empty issues array', async () => {
-      const notifier = new TeamsNotifier('https://outlook.office.com/webhook/abc123');
+      const notifier = new TeamsNotifier('https://company.webhook.office.com/webhookb2/abc123');
       await notifier.sendClosedItemsNotification([], 'Test Board');
       expect(mockedAxios.post).not.toHaveBeenCalled();
     });
@@ -144,11 +154,11 @@ describe('TeamsNotifier', () => {
     it('should send security alert with correct severity color', async () => {
       mockedAxios.post.mockResolvedValue({ data: '1', status: 200 });
 
-      const notifier = new TeamsNotifier('https://outlook.office.com/webhook/abc123');
+      const notifier = new TeamsNotifier('https://company.webhook.office.com/webhookb2/abc123');
       await notifier.sendSecurityAlert('Test Alert', 'Security issue detected', 'critical');
 
       expect(mockedAxios.post).toHaveBeenCalledWith(
-        'https://outlook.office.com/webhook/abc123',
+        'https://company.webhook.office.com/webhookb2/abc123',
         expect.objectContaining({
           themeColor: 'F44336', // Critical severity color
           summary: 'Security Alert: Test Alert'
@@ -159,7 +169,7 @@ describe('TeamsNotifier', () => {
 
     it('should use correct colors for different severities', async () => {
       mockedAxios.post.mockResolvedValue({ data: '1', status: 200 });
-      const notifier = new TeamsNotifier('https://outlook.office.com/webhook/abc123');
+      const notifier = new TeamsNotifier('https://company.webhook.office.com/webhookb2/abc123');
 
       const severities: Array<['low' | 'medium' | 'high' | 'critical', string]> = [
         ['low', '00C853'],

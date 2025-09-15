@@ -9,6 +9,8 @@ import {
 import { SecureJiraClient } from './jira-client-secure.js';
 import { BlogScaffolder } from './blog-scaffolder.js';
 import { InputValidator } from './validators.js';
+import { HealthService } from './health-service.js';
+import { logger } from './logger.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -17,8 +19,14 @@ class JiraMCPServer {
   private server: Server;
   private jiraClient: SecureJiraClient;
   private blogScaffolder: BlogScaffolder;
+  private healthService: HealthService;
 
   constructor() {
+    logger.info('Initializing Jira MCP Server', {
+      operation: 'server_init',
+      version: '0.1.0'
+    });
+
     this.server = new Server(
       {
         name: 'jira-mcp-server',
@@ -36,6 +44,12 @@ class JiraMCPServer {
       ? process.env.JIRA_ALLOWED_PROJECTS.split(',').map(p => p.trim())
       : undefined;
 
+    logger.info('Configuring Jira client', {
+      operation: 'jira_client_init',
+      host: process.env.JIRA_HOST,
+      allowedProjects: allowedProjects?.length || 0
+    });
+
     this.jiraClient = new SecureJiraClient(
       process.env.JIRA_HOST || '',
       process.env.JIRA_EMAIL || '',
@@ -44,6 +58,11 @@ class JiraMCPServer {
     );
 
     this.blogScaffolder = new BlogScaffolder();
+
+    // Initialize health service
+    const healthPort = parseInt(process.env.HEALTH_PORT || '3000', 10);
+    this.healthService = new HealthService(healthPort);
+    this.healthService.setJiraClient(this.jiraClient);
 
     this.setupHandlers();
   }
@@ -129,8 +148,19 @@ class JiraMCPServer {
   }
 
   private async getBoards() {
+    const startTime = Date.now();
+    const requestLogger = logger.child({ operation: 'get_boards' });
+
     try {
+      requestLogger.info('Fetching Jira boards');
+
       const boards = await this.jiraClient.getBoards();
+
+      const duration = Date.now() - startTime;
+      requestLogger.performance('get_boards', duration, {
+        boardsCount: boards.length
+      });
+
       return {
         content: [
           {
@@ -140,11 +170,18 @@ class JiraMCPServer {
         ],
       };
     } catch (error) {
+      const duration = Date.now() - startTime;
+      const message = error instanceof Error ? error.message : 'Unknown error';
+
+      requestLogger.error('Failed to fetch boards', error instanceof Error ? error : new Error(message), {
+        duration
+      });
+
       return {
         content: [
           {
             type: 'text',
-            text: `Error fetching boards: ${error}`,
+            text: `Error fetching boards: ${InputValidator.sanitizeErrorMessage(message)}`,
           },
         ],
       };
@@ -152,12 +189,33 @@ class JiraMCPServer {
   }
 
   private async getClosedItems(args: any) {
+    const startTime = Date.now();
+    const requestLogger = logger.child({ operation: 'get_closed_items' });
+
     try {
       const { boardIds, days = 7 } = args;
+
+      requestLogger.info('Validating input parameters', {
+        boardIds: Array.isArray(boardIds) ? boardIds.length : 'invalid',
+        days
+      });
+
       const validBoardIds = InputValidator.validateBoardIds(boardIds);
       const validDays = InputValidator.validateDays(days);
 
+      requestLogger.info('Fetching closed items from Jira', {
+        boardIds: validBoardIds,
+        days: validDays
+      });
+
       const closedItems = await this.jiraClient.getClosedItems(validBoardIds, validDays);
+
+      const duration = Date.now() - startTime;
+      requestLogger.performance('get_closed_items', duration, {
+        boardIds: validBoardIds,
+        days: validDays,
+        itemsCount: closedItems.length
+      });
 
       return {
         content: [
@@ -168,7 +226,18 @@ class JiraMCPServer {
         ],
       };
     } catch (error) {
+      const duration = Date.now() - startTime;
       const message = error instanceof Error ? error.message : 'Unknown error';
+
+      if (error instanceof Error && error.message.includes('Invalid')) {
+        requestLogger.validationError('input_parameters', args, message);
+      } else {
+        requestLogger.error('Failed to fetch closed items', error instanceof Error ? error : new Error(message), {
+          duration,
+          args
+        });
+      }
+
       return {
         content: [
           {
@@ -213,9 +282,53 @@ class JiraMCPServer {
   }
 
   async start() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('Jira MCP Server started');
+    try {
+      logger.info('Starting Jira MCP Server', {
+        operation: 'server_start',
+        transport: 'stdio'
+      });
+
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+
+      logger.info('Jira MCP Server started successfully', {
+        operation: 'server_started',
+        pid: process.pid
+      });
+
+      // Setup graceful shutdown
+      process.on('SIGTERM', this.shutdown.bind(this));
+      process.on('SIGINT', this.shutdown.bind(this));
+    } catch (error) {
+      logger.error('Failed to start Jira MCP Server', error instanceof Error ? error : new Error('Unknown error'), {
+        operation: 'server_start_failed'
+      });
+      throw error;
+    }
+  }
+
+  private async shutdown() {
+    logger.info('Jira MCP Server shutting down', {
+      operation: 'server_shutdown',
+      pid: process.pid
+    });
+
+    try {
+      await this.healthService.shutdown();
+      logger.info('Health service stopped successfully', {
+        operation: 'health_service_shutdown'
+      });
+    } catch (error) {
+      logger.error('Error during health service shutdown', error instanceof Error ? error : new Error('Unknown error'), {
+        operation: 'health_service_shutdown_failed'
+      });
+    }
+
+    logger.info('Jira MCP Server shutdown complete', {
+      operation: 'server_shutdown_complete'
+    });
+
+    process.exit(0);
   }
 }
 
